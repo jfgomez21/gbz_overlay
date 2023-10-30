@@ -91,36 +91,42 @@ class InterfaceState(Enum):
   ENABLED = 1
   CONNECTED = 2
 
-# From my tests:
-# over 4V => charging
-# 4.7V => charging and charged 100%
-# 3.9V => not charging, 100%
-# 3.2V => will die in 10 mins under load, shut down
-# 3.3V => warning icon?
-
 adc = Adafruit_ADS1x15.ADS1115()
-# Choose a gain of 1 for reading voltages from 0 to 4.09V.
-# Or pick a different gain to change the range of voltages that are read:
-#  - 2/3 = +/-6.144V
-#  -   1 = +/-4.096V
-#  -   2 = +/-2.048V
-#  -   4 = +/-1.024V
-#  -   8 = +/-0.512V
-#  -  16 = +/-0.256V
-# See table 3 in the ADS1015i/ADS1115 datasheet for more info on gain.
+chargerState = ChargerState.STANDBY
 
-def translate_bat(voltage):
-  # Figure out how 'wide' each range is
-  state = voltage <= vmax["discharging"] and "discharging" or "charging"
+def start_process(name, path):
+    global overlay_processes
 
-  leftSpan = vmax[state] - vmin[state]
-  rightSpan = len(icons[state]) - 1
+    overlay_processes[name] = subprocess.Popen(pngview_call + [str(int(resolution[0]) - dpi), path])
 
-  # Convert the left range into a 0-1 range (float)
-  valueScaled = float(voltage - vmin[state]) / float(leftSpan)
+def end_process(name):
+    global overlay_processes
 
-  # Convert the 0-1 range into a value in the right range.
-  return icons[state][int(round(valueScaled * rightSpan))]
+    if name in overlay_processes:
+        overlay_processes[name].kill()
+
+    del overlay_processes[name]
+
+def translate_bat(voltage, state):
+    if state == ChargerState.CHARGE_COMPLETE:
+        return "charging_full"
+
+    if voltage < LOW_VOLTAGE_THRESHOLD:
+        return "alert_red"
+
+    value = (voltage - LOW_VOLTAGE_THRESOLD) / (MAX_VOLTAGE - LOW_VOLTAGE_THRESOLD))
+    value = math.floor(int(value * 100) / 10) * 10)
+
+    if state == ChargerState.STANDBY:
+        if value < 20:
+            return "alert"
+
+        return value;
+
+    if value < 20:
+        value = 20
+
+    return "charging_%d" % value
 
 def wifi():
   global wifi_state, overlay_processes
@@ -215,37 +221,9 @@ def read_voltage(pin):
 
     return (value * (R1 + R2)) / R2
 
-def battery():
-  global battery_level, overlay_processes, battery_history
-
-  value_v = read_voltage(BATTERY_INPUT_PIN)
-
-  battery_history.append(value_v)
-
-  try:
-    level_icon=translate_bat(median(battery_history))
-  except IndexError:
-    level_icon="unknown"
-
-
-  if value_v <= 3.2:
-    my_logger.warn("Battery voltage at or below 3.2V. Initiating shutdown within 1 minute")
-
-    #subprocess.Popen(pngview_call + [str(int(resolution[0]) / 2 - 64), "-y", str(int(resolution[1]) / 2 - 64), icon_battery_critical_shutdown])
-    #os.system("sleep 60 && sudo poweroff &")
-
-  if level_icon != battery_level:
-    if "bat" in overlay_processes:
-      overlay_processes["bat"].kill()
-      del overlay_processes["bat"]
-
-    icon='ic_battery_' + level_icon + "_white_" + str(dpi) + "dp.png"
-    #overlay_processes["bat"] = subprocess.Popen(pngview_call + [ str(int(resolution[0]) - dpi), iconpath + icon])
-  return (level_icon, value_v)
-
-def charger():
-    value = read_voltage(CHARGER_INPUT_PIN)
+def read_charger():
     state = ChargerState.CHARGE_COMPLETE
+    value = read_voltage(CHARGER_INPUT_PIN)
 
     if value < CHARGER_LOW_MIN_VOLTAGE:
         state = ChargerState.STANDBY
@@ -254,12 +232,68 @@ def charger():
 
     return (state, value)
 
+def battery():
+    global battery_history, battery_level, charger_state, battery_visible, timestamp
+
+    value_v = read_voltage(BATTERY_INPUT_PIN)
+    (charger_s, charger_v) = read_charger();
+
+    battery_history.append(value_v)
+
+    level_icon = translate_bat(median(battery_history), charger_s)
+    path = "%s/ic_battery_%s_white_%ddp.png" % ("overlay-icons", level_icon, dpi)
+
+    #display the battery if the charger state has changed
+    #display the battery if the battery level is alert or alert_red
+    #hide the battery after X seconds
+    if charger_s != charger_state:
+        end_process("bat")
+
+        start_process("bat", path)
+
+        battery_level = level_icon
+        charger_state = charger_s
+        battery_visible = True
+        timestamp = time.time()
+    elif level_icon in ["alert", "alert_red"]
+        if level_icon != battery_level:
+            end_process("bat")
+
+            start_process("bat", path);
+
+            battery_level = level_icon
+            battery_visible = True
+            timestamp = time.time()
+
+        if level_icon == "alert_red":
+            time = time.time() - timestamp
+
+            if time > 5:
+                if battery_visible:
+                    end_process("bat")
+                else
+                    start_process("bat", path)
+
+                battery_visible = not battery_visible
+                timestamp = time.time()
+    elif battery_visible:
+        time = time.time() - timestamp
+
+        if time > 10:
+            end_process("bat")
+            battery_visible = False
+
+  return (level_icon, value_v, charger_s, charger_v)
+
 overlay_processes = {}
 wifi_state = None
 bt_state = None
 battery_level = None
 env = None
 battery_history = deque(maxlen=5)
+timestamp = 0
+battery_visible = False
+charger_state = ChargerState.STANDBY
 
 # Set up logging
 my_logger = logging.getLogger('gbzOverlay')
@@ -274,11 +308,9 @@ resolution=re.search("(\d{3,}x\d{3,})", subprocess.check_output(fbfile.split()).
 my_logger.info(resolution)
 
 while True:
-    (battery_level, value_v) = battery()
-
-    (charger_state, charger_v) = charger()
-    wifi_state = wifi()
-    bt_state = bluetooth()
+    (battery_level, value_v, charger_state, charger_v) = battery()
+    #wifi_state = wifi()
+    #bt_state = bluetooth()
     env = environment()
 
     my_logger.info("%s,battery: %.2f,charger_state: %s, charger: %.2f,icon: %s,wifi: %s,bt: %s, throttle: %#0x" % (
