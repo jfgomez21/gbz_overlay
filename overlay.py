@@ -17,6 +17,9 @@ import os
 import re
 import logging
 import logging.handlers
+import math
+import time
+
 from datetime import datetime
 from statistics import median
 from collections import deque
@@ -48,10 +51,10 @@ bt_icons = {
 #icon positions starting from the right
 icon_indexes = {
 	"battery" : 0,
-	"wifi" : 1
-	"bluetooth" : 2
-	"under_voltage" : 3
-	"freq_capped" : 4
+	"wifi" : 1,
+	"bluetooth" : 2,
+	"under_voltage" : 3,
+	"freq_capped" : 4,
 	"throttled" : 5
 }
 
@@ -62,11 +65,12 @@ env_cmd="vcgencmd get_throttled"
 
 fbfile="tvservice -s"
 
-RESOLUTION = pow(2, 15) - 1
-MAX_VOLTAGE = 6.144
+ADC_RESOLUTION = pow(2, 15) - 1
+ADC_MAX_VOLTAGE = 6.144
 R1 = 10000
 R2 = 10000
 
+BATTERY_MAX_VOLTAGE = 4.2
 BATTERY_INPUT_PIN = 0
 CHARGER_INPUT_PIN = 3
 
@@ -110,100 +114,99 @@ resolution = re.search("(\d{3,}x\d{3,})", subprocess.check_output(fbfile.split()
 my_logger.info("resolution - %sx%s" % (resolution[0], resolution[1]))
 
 def start_process(name, path):
-	global overlay_processes
+    global overlay_processes
 
-	index = icon_indexes[name] + 1
+    index = icon_indexes[name] + 1
 
-	overlay_processes[name] = subprocess.Popen(pngview_call + [str(int(resolution[0]) - (dpi * index)), path])
+    overlay_processes[name] = subprocess.Popen(pngview_call + [str(int(resolution[0]) - (dpi * index)), path])
 
 def end_process(name):
-	global overlay_processes
+    global overlay_processes
 
-	if name in overlay_processes:
-            overlay_processes[name].kill()
-
-	del overlay_processes[name]
+    if name in overlay_processes:
+        overlay_processes[name].kill()
+        del overlay_processes[name]
 
 def contains_process(name):
-	return name in overlay_processes
+    return name in overlay_processes
 
 def translate_bat(voltage, state):
-	if state == ChargerState.CHARGE_COMPLETE:
+    if state == ChargerState.CHARGE_COMPLETE:
 	    return "charging_full"
 
-	if voltage < LOW_VOLTAGE_THRESHOLD:
-	    return "alert_red"
+    if voltage < LOW_VOLTAGE_THRESHOLD:
+        return "alert_red"
 
-	value = (voltage - LOW_VOLTAGE_THRESOLD) / (MAX_VOLTAGE - LOW_VOLTAGE_THRESOLD))
-	value = math.floor(int(value * 100) / 10) * 10)
+    value = (voltage - LOW_VOLTAGE_THRESHOLD) / (BATTERY_MAX_VOLTAGE - LOW_VOLTAGE_THRESHOLD)
+    value = math.floor(int(value * 100) / 10) * 10
 
-	if state == ChargerState.STANDBY:
-	    if value < 20:
-	        return "alert"
+    if state == ChargerState.STANDBY:
+        if value < 20:
+            return "alert"
 
-	    return value;
+        return value;
 
-	if value < 20:
-	    value = 20
+    if value < 20:
+        value = 20
 
-	return "charging_%d" % value
+    return "charging_%d" % value
 
 def wifi():
-	global wifi_state, overlay_processes
+    global wifi_state, overlay_processes, wifi_timestamp
 
-	new_wifi_state = InterfaceState.DISABLED
+    new_wifi_state = InterfaceState.DISABLED
 
-	try:
-            f = open(wifi_carrier, "r")
-	    carrier_state = int(f.read().rstrip())
-	    f.close()
+    try:
+        f = open(wifi_carrier, "r")
+        carrier_state = int(f.read().rstrip())
+        f.close()
 
-	    if carrier_state == 1:
-	        # ifup and connected to AP
-	        new_wifi_state = InterfaceState.CONNECTED
-            elif carrier_state == 0:
-                f = open(wifi_linkmode, "r")
-                linkmode_state = int(f.read().rstrip())
-                f.close()
+        if carrier_state == 1:
+	    # ifup and connected to AP
+            new_wifi_state = InterfaceState.CONNECTED
+        elif carrier_state == 0:
+            f = open(wifi_linkmode, "r")
+            linkmode_state = int(f.read().rstrip())
+            f.close()
 
-                if linkmode_state == 1:
-                    # ifup but not connected to any network
-                    new_wifi_state = InterfaceState.ENABLED
-                    # else - must be ifdown
-        except IOError:
-            pass
+            if linkmode_state == 1:
+                # ifup but not connected to any network
+                new_wifi_state = InterfaceState.ENABLED
+                # else - must be ifdown
+    except IOError:
+        pass
 
-	if new_wifi_state != wifi_state:
-	    end_process("wifi")
-	    start_process("wifi", wifi_icons[new_wifi_state.name.lower()])
+    if new_wifi_state != wifi_state:
+        end_process("wifi")
+        start_process("wifi", wifi_icons[new_wifi_state.name.lower()])
 
-	    wifi_timestamp = time.time()
-	else
-	    if time.time() - wifi_timestamp > 10:
-	        end_process("wifi")
+        wifi_timestamp = time.time()
+    else:
+        if time.time() - wifi_timestamp > 10:
+            end_process("wifi")
 
-	return new_wifi_state
+    return new_wifi_state
 
 def bluetooth():
-    global bt_state, overlay_processes
+    global bt_state, overlay_processes, bluetooth_timestamp
 
     new_bt_state = InterfaceState.DISABLED
 
     try:
         p1 = subprocess.Popen('hciconfig', stdout = subprocess.PIPE)
-	p2 = subprocess.Popen(['awk', 'FNR == 3 {print tolower($1)}'], stdin = p1.stdout, stdout=subprocess.PIPE)
-	state = p2.communicate()[0].decode().rstrip()
+        p2 = subprocess.Popen(['awk', 'FNR == 3 {print tolower($1)}'], stdin = p1.stdout, stdout=subprocess.PIPE)
+        state = p2.communicate()[0].decode().rstrip()
 
-	if state == "up":
-	    new_bt_state = InterfaceState.ENABLED
+        if state == "up":
+            new_bt_state = InterfaceState.ENABLED
     except IOError:
         pass
 
     try:
         devices=os.listdir(bt_devices_dir)
 
-	if len(devices) > 1:
-	    new_bt_state = InterfaceState.CONNECTED
+        if len(devices) > 1:
+            new_bt_state = InterfaceState.CONNECTED
     except OSError:
         pass
 
@@ -212,7 +215,7 @@ def bluetooth():
 
         start_process("bluetooth", bt_icons[new_bt_state.name.lower()])
         bluetooth_timestamp = time.time()
-    else
+    else:
         if time.time() - bluetooth_timestamp > 10:
             end_process("bluetooth")
 
@@ -236,7 +239,7 @@ def environment():
 
 def read_voltage(pin):
     value = adc.read_adc(pin, gain=2/3)
-    value = (value * MAX_VOLTAGE) / RESOLUTION
+    value = (value * ADC_MAX_VOLTAGE) / ADC_RESOLUTION
 
     return (value * (R1 + R2)) / R2
 
@@ -260,7 +263,7 @@ def battery():
     battery_history.append(value_v)
 
     level_icon = translate_bat(median(battery_history), charger_s)
-    path = "%s/ic_battery_%s_white_%ddp.png" % ("overlay-icons", level_icon, dpi)
+    path = "%s/ic_battery_%s_white_%ddp.png" % (iconpath, level_icon, dpi)
 
     #display the battery if the charger state has changed
     #display the battery if the battery level is alert or alert_red
@@ -274,7 +277,7 @@ def battery():
         charger_state = charger_s
         battery_visible = True
         battery_timestamp = time.time()
-    elif level_icon in ["alert", "alert_red"]
+    elif level_icon in ["alert", "alert_red"]:
         if level_icon != battery_level:
             end_process("battery")
 
@@ -285,39 +288,37 @@ def battery():
             battery_timestamp = time.time()
 
         if level_icon == "alert_red":
-            time = time.time() - battery_timestamp
-
-            if time > 5:
+            if time.time() - battery_timestamp > 5:
                 if battery_visible:
                     end_process("battery")
-                else
+                else:
                     start_process("battery", path)
 
                 battery_visible = not battery_visible
                 battery_timestamp = time.time()
     elif battery_visible:
-        time = time.time() - battery_timestamp
-
-        if time > 10:
+        if time.time() - battery_timestamp > 10:
             end_process("battery")
             battery_visible = False
 
-  return (level_icon, value_v, charger_s, charger_v)
+    return (level_icon, value_v, charger_s, charger_v)
 
 while True:
-    (battery_level, value_v, charger_state, charger_v) = battery()
-    #wifi_state = wifi()
-    #bt_state = bluetooth()
+    (battery_level, value_v, charger_s, charger_v) = battery()
+    wifi_state = wifi()
+    bt_state = bluetooth()
     env = environment()
 
+    """
     my_logger.info("%s,battery: %.2f,charger_state: %s, charger: %.2f,icon: %s,wifi: %s,bt: %s, throttle: %#0x" % (
         datetime.now(),
         value_v,
-        charger_state,
+        charger_s,
         charger_v,
         battery_level,
         wifi_state.name,
         bt_state.name,
         env
     ))
-    time.sleep(5)
+    """
+    time.sleep(2)
