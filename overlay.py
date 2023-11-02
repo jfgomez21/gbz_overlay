@@ -79,6 +79,9 @@ CHARGER_LOW_MAX_VOLTAGE = 1
 
 LOW_VOLTAGE_THRESHOLD = 3.3
 
+ICON_DISPLAY_SECONDS = 10
+FLASHING_ICON_DISPLAY_SECONDS = 2
+
 class ChargerState(Enum) :
 	STANDBY = 0
 	CHARGING = 1
@@ -132,24 +135,21 @@ def contains_process(name):
 
 def translate_bat(voltage, state):
     if state == ChargerState.CHARGE_COMPLETE:
-	    return "charging_full"
+	    return "charging_100"
 
-    if voltage < LOW_VOLTAGE_THRESHOLD:
+    if voltage <= LOW_VOLTAGE_THRESHOLD:
         return "alert_red"
+
+    if voltage >= BATTERY_MAX_VOLTAGE:
+        voltage = BATTERY_MAX_VOLTAGE
 
     value = (voltage - LOW_VOLTAGE_THRESHOLD) / (BATTERY_MAX_VOLTAGE - LOW_VOLTAGE_THRESHOLD)
     value = math.floor(int(value * 100) / 10) * 10
 
-    if state == ChargerState.STANDBY:
-        if value < 20:
-            return "alert"
+    if state == ChargerState.CHARGING:
+        return "charging_%d" % value
 
-        return value;
-
-    if value < 20:
-        value = 20
-
-    return "charging_%d" % value
+    return "%d" % value
 
 def wifi():
     global wifi_state, overlay_processes, wifi_timestamp
@@ -182,7 +182,7 @@ def wifi():
 
         wifi_timestamp = time.time()
     else:
-        if time.time() - wifi_timestamp > 10:
+        if time.time() - wifi_timestamp > ICON_DISPLAY_SECONDS:
             end_process("wifi")
 
     return new_wifi_state
@@ -216,7 +216,7 @@ def bluetooth():
         start_process("bluetooth", bt_icons[new_bt_state.name.lower()])
         bluetooth_timestamp = time.time()
     else:
-        if time.time() - bluetooth_timestamp > 10:
+        if time.time() - bluetooth_timestamp > ICON_DISPLAY_SECONDS:
             end_process("bluetooth")
 
     return new_bt_state
@@ -258,7 +258,7 @@ def battery():
     global battery_history, battery_level, charger_state, battery_visible, battery_timestamp
 
     value_v = read_voltage(BATTERY_INPUT_PIN)
-    (charger_s, charger_v) = read_charger();
+    (charger_s, charger_v) = read_charger()
 
     battery_history.append(value_v)
 
@@ -281,14 +281,14 @@ def battery():
         if level_icon != battery_level:
             end_process("battery")
 
-            start_process("battery", path);
+            start_process("battery", path)
 
             battery_level = level_icon
             battery_visible = True
             battery_timestamp = time.time()
 
         if level_icon == "alert_red":
-            if time.time() - battery_timestamp > 2:
+            if time.time() - battery_timestamp > FLASHING_ICON_DISPLAY_SECONDS:
                 if battery_visible:
                     end_process("battery")
                 else:
@@ -297,7 +297,7 @@ def battery():
                 battery_visible = not battery_visible
                 battery_timestamp = time.time()
     elif battery_visible:
-        if time.time() - battery_timestamp > 10:
+        if time.time() - battery_timestamp > ICON_DISPLAY_SECONDS:
             end_process("battery")
             battery_visible = False
 
