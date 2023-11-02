@@ -288,7 +288,7 @@ def battery():
             battery_timestamp = time.time()
 
         if level_icon == "alert_red":
-            if time.time() - battery_timestamp > 5:
+            if time.time() - battery_timestamp > 2:
                 if battery_visible:
                     end_process("battery")
                 else:
